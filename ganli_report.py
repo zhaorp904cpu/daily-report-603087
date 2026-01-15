@@ -408,7 +408,7 @@ def generate_single_stock_report(info):
 
 
 def send_mail(html_content):
-    from email.mime_text import MIMEText
+    from email.mime.text import MIMEText
     from email.header import Header
     from email.utils import formataddr
 
