@@ -171,7 +171,7 @@ def call_openai_compatible_api(prompt: str) -> str:
 
 def generate_single_stock_report(info):
     """
-    生成单只股票的 HTML 报告片段
+    生成单只股票的 HTML 报告片段（详细专业版）
     """
     stock_name = info["名称"]
     stock_code = info["代码"]
@@ -179,9 +179,10 @@ def generate_single_stock_report(info):
     print(f"🧠 [{stock_name}] 正在调用模型: {PROVIDER}...")
     
     prompt = f"""
-你是一名长期跟踪{stock_name}({stock_code})的专业卖方医药分析师，负责撰写“单票监控日报”。
+你是一名长期跟踪{stock_name}({stock_code})的专业卖方分析师，负责撰写“单票监控日报”。
 
-请根据下述“当日行情与技术数据”，输出一份结构化的 HTML 报告片段。
+请根据下述“当日行情与技术数据”，输出一份结构化的 HTML 日报片段。
+要求：内容专业、简洁、有观点，避免空泛套话。
 
 【当日行情与技术数据】
 - 日期：{info["日期"]}
@@ -191,37 +192,53 @@ def generate_single_stock_report(info):
 - 均线：MA5={info["MA5"]:.2f}，MA10={info["MA10"]:.2f}，MA20={info["MA20"]:.2f}
 
 【写作任务】
-请输出 HTML 代码（不要包含 <html> 或 <body> 标签，因为这将作为大报告的一部分），结构如下：
+请严格按照以下模块输出，并使用 HTML 标签（如 h2, h3, p, ul, li, table 等）组织内容。
+**注意：不要包含 <html>, <head>, <body> 标签，仅输出 div 片段。**
 
-<div style="border: 1px solid #ddd; padding: 15px; margin-bottom: 20px; border-radius: 8px;">
-    <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;">{stock_name} ({stock_code}) - {info["日期"]}</h2>
-    
-    <h3>1. 核心结论</h3>
-    <p>（此处用2-3句话总结今日走势核心特征，以及对短期趋势的定性判断）</p>
+请将整个报告包裹在一个 <div style="border: 1px solid #ddd; padding: 20px; margin-bottom: 30px; border-radius: 8px; background-color: #fff;"> 容器中。
 
-    <h3>2. 技术面概览</h3>
-    <table border="1" cellpadding="5" cellspacing="0" style="border-collapse: collapse; width: 100%;">
-        <tr style="background-color: #f2f2f2;">
-            <th>收盘</th><th>涨跌幅</th><th>成交额(亿)</th><th>换手率</th><th>MA5</th><th>MA20</th>
-        </tr>
-        <tr>
-            <td>{info["收盘"]:.2f}</td>
-            <td>{info["涨跌幅"]:.2f}%</td>
-            <td>{info["成交额"]/100000000:.2f}</td>
-            <td>{info["换手率"]:.2f}%</td>
-            <td>{info["MA5"]:.2f}</td>
-            <td>{info["MA20"]:.2f}</td>
-        </tr>
-    </table>
-    <p>（简要点评量价配合情况及均线支撑/压力状态）</p>
+结构如下：
 
-    <h3>3. 策略建议</h3>
-    <p>（针对短线和中线投资者的操作建议，如：持有、观望、逢低吸纳等）</p>
+<div style="border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 20px;">
+    <h2 style="margin: 0; color: #2c3e50;">{stock_name} ({stock_code}) - 每日深度追踪</h2>
 </div>
 
-【注意】
-- 仅输出 HTML 代码片段。
-- 保持客观冷静的分析师语调。
+一、<h3>当日核心结论</h3>
+用 2~4 句简洁文字，总结：
+1) 今天股价和成交的核心变化是什么（例如：放量上涨、缩量回调、放量下跌等）；
+2) 该变化更多来自情绪波动，还是基本面或事件驱动；
+3) 对短期(1~2 周)和中期(3~6 个月)的观点是偏多、中性还是偏谨慎。
+
+二、<h3>当日交易与技术面</h3>
+1) 生成一张 HTML 表格 (table)，包含列：收盘、涨跌幅、成交额(亿)、换手率、MA5、MA20。
+   (数值保留两位小数)
+2) 在表格下用 1~2 段文字分析：
+   a) 收盘价相对均线(MA5/10/20)的位置及支撑压力状态；
+   b) 量价配合是否健康；
+   c) 关键技术形态信号。
+
+三、<h3>基本面与估值跟踪</h3>
+在不编造具体财务数字的前提下，从以下角度定性评估：
+1) **{stock_name}** 在其所属行业（如医药、新能源等）的定位、核心产品和当前成长逻辑；
+2) 市场对其收入增速和盈利能力的预期变化；
+3) 行业政策或宏观环境对该公司的潜在影响；
+4) 当前估值水平的定性判断（偏低、合理、偏高）。
+
+四、<h3>事件与风险跟踪</h3>
+用无序列表 (ul/li) 列出未来 1~3 个月需要重点跟踪的要素：
+1) 公司层面：新产品/新产能进度、大额订单、重要股东动向等；
+2) 行业层面：政策变化、原材料价格波动、竞争格局变化等；
+3) 简要说明若出现不利结果可能带来的风险。
+
+五、<h3>后续观察要点与策略思路</h3>
+1) 给出 2~3 个需要重点观察的价格或技术信号（如“若有效跌破 MA20...”）；
+2) 针对不同类型投资者（稳健型/激进型）给出简要策略建议。
+
+</div>
+
+【格式要求】
+1) 仅输出 HTML 代码片段。
+2) 风格参考专业券商研报，理性、克制。
 """
     if PROVIDER == "gemini":
         return call_gemini_http(prompt)
