@@ -6,6 +6,7 @@ import sys
 import ssl
 import requests
 import json
+import urllib.parse
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -169,6 +170,81 @@ def call_openai_compatible_api(prompt: str) -> str:
         raise RuntimeError(f"API 返回格式异常: {data}")
 
 
+def get_stock_news(stock_code, stock_name):
+    """
+    抓取东方财富的新闻资讯和研报摘要
+    """
+    print(f"📰 [{stock_name}] 正在抓取新闻资讯...")
+    news_content = ""
+    
+    # 1. 抓取公告 (EastMoney)
+    url_ann = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+    params_ann = {
+        "sr": "-1",
+        "page_size": "5",
+        "page_index": "1",
+        "ann_type": "A",
+        "client_source": "web",
+        "stock_list": stock_code,
+        "f_node": "0",
+        "s_node": "0",
+    }
+    try:
+        r = requests.get(url_ann, params=params_ann, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data and "list" in data["data"]:
+                news_content += "【近期重要公告】\n"
+                for item in data["data"]["list"][:3]:
+                    title = item.get("title", "")
+                    date = item.get("notice_date", "")[:10]
+                    news_content += f"- {date}: {title}\n"
+    except Exception as e:
+        print(f"⚠️ 公告抓取失败: {e}")
+    
+    return news_content
+
+
+def get_weibo_search_url(stock_name):
+    encoded = urllib.parse.quote(stock_name)
+    return f"https://s.weibo.com/weibo?q={encoded}"
+
+
+def get_x_tweets(stock_code, stock_name):
+    token = os.environ.get("X_BEARER_TOKEN")
+    if not token:
+        return ""
+    print(f"🐦 [{stock_name}] 正在抓取 X(Twitter) 推文...")
+    url = "https://api.twitter.com/2/tweets/search/recent"
+    query = f"\"{stock_name}\" OR \"{stock_code}\" lang:zh -is:retweet"
+    params = {
+        "query": query,
+        "max_results": 10,
+        "tweet.fields": "created_at,lang"
+    }
+    headers = {
+        "Authorization": f"Bearer {token}"
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️ X API 返回状态码: {resp.status_code}")
+            return ""
+        data = resp.json()
+        tweets = data.get("data", [])
+        if not tweets:
+            return ""
+        content = "【Twitter(X) 近期相关推文摘要】\n"
+        for t in tweets[:5]:
+            text = t.get("text", "").replace("\n", " ")
+            created = t.get("created_at", "")
+            content += f"- {created}: {text}\n"
+        return content
+    except Exception as e:
+        print(f"⚠️ 抓取 X 推文失败: {e}")
+        return ""
+
+
 def generate_single_stock_report(info):
     """
     生成单只股票的 HTML 报告片段（详细专业版）
@@ -176,12 +252,17 @@ def generate_single_stock_report(info):
     stock_name = info["名称"]
     stock_code = info["代码"]
     
+    # 获取新闻资讯
+    news_data = get_stock_news(stock_code, stock_name)
+    x_data = get_x_tweets(stock_code, stock_name)
+    weibo_url = get_weibo_search_url(stock_name)
+    
     print(f"🧠 [{stock_name}] 正在调用模型: {PROVIDER}...")
     
     prompt = f"""
 你是一名长期跟踪{stock_name}({stock_code})的专业卖方分析师，负责撰写“单票监控日报”。
 
-请根据下述“当日行情与技术数据”，输出一份结构化的 HTML 日报片段。
+请根据下述“当日行情与技术数据”以及“近期资讯与舆情”，输出一份结构化的 HTML 日报片段。
 要求：内容专业、简洁、有观点，避免空泛套话。
 
 【当日行情与技术数据】
@@ -190,6 +271,11 @@ def generate_single_stock_report(info):
 - 今开价：{info["今开"]:.2f} 元，最高价：{info["最高"]:.2f} 元，最低价：{info["最低"]:.2f} 元
 - 成交额：{info["成交额"]/100000000:.2f} 亿元，成交量：{info["成交量"]:.0f} 手，换手率：{info["换手率"]:.2f}%
 - 均线：MA5={info["MA5"]:.2f}，MA10={info["MA10"]:.2f}，MA20={info["MA20"]:.2f}
+
+【近期资讯与舆情输入】
+{news_data}
+{x_data}
+(注：微博和 X(Twitter) 均受反爬与权限限制，文本可能不完整。请结合“股价波动幅度”和“成交量”综合推断市场情绪，例如：无利好大涨意味着情绪亢奋/游资炒作；缩量阴跌意味着人气涣散。)
 
 【写作任务】
 请严格按照以下模块输出，并使用 HTML 标签（如 h2, h3, p, ul, li, table 等）组织内容。
@@ -201,21 +287,23 @@ def generate_single_stock_report(info):
 
 <div style="border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 20px;">
     <h2 style="margin: 0; color: #2c3e50;">{stock_name} ({stock_code}) - 每日深度追踪</h2>
+    <div style="font-size: 12px; margin-top: 5px; color: #666;">
+        <a href="{weibo_url}" target="_blank" style="color: #e74c3c; text-decoration: none; font-weight: bold;">🔍 点击查看微博实时舆情</a>
+    </div>
 </div>
 
 一、<h3>当日核心结论</h3>
 用 2~4 句简洁文字，总结：
-1) 今天股价和成交的核心变化是什么（例如：放量上涨、缩量回调、放量下跌等）；
+1) 今天股价和成交的核心变化是什么；
 2) 该变化更多来自情绪波动，还是基本面或事件驱动；
 3) 对短期(1~2 周)和中期(3~6 个月)的观点是偏多、中性还是偏谨慎。
 
 二、<h3>当日交易与技术面</h3>
-1) 生成一张 HTML 表格 (table)，包含列：收盘、涨跌幅、成交额(亿)、换手率、MA5、MA20。
-   (数值保留两位小数)
-2) 在表格下用 1~2 段文字分析：
-   a) 收盘价相对均线(MA5/10/20)的位置及支撑压力状态；
-   b) 量价配合是否健康；
-   c) 关键技术形态信号。
+1) 生成一张 HTML 表格 (table)，包含列：收盘、涨跌幅、成交额(亿)、换手率。
+   (数值保留两位小数，**注意：表格中不再列出具体均线数值**)
+2) 在表格下用 1~2 句简练文字，仅分析：
+   a) 量价配合是否健康；
+   b) 是否出现关键的突破或反转形态（如吞没、启明星等），不必纠结于具体均线支撑位。
 
 三、<h3>基本面与估值跟踪</h3>
 在不编造具体财务数字的前提下，从以下角度定性评估：
@@ -224,11 +312,11 @@ def generate_single_stock_report(info):
 3) 行业政策或宏观环境对该公司的潜在影响；
 4) 当前估值水平的定性判断（偏低、合理、偏高）。
 
-四、<h3>事件与风险跟踪</h3>
-用无序列表 (ul/li) 列出未来 1~3 个月需要重点跟踪的要素：
-1) 公司层面：新产品/新产能进度、大额订单、重要股东动向等；
-2) 行业层面：政策变化、原材料价格波动、竞争格局变化等；
-3) 简要说明若出现不利结果可能带来的风险。
+四、<h3>事件与风险跟踪（深度舆情分析）</h3>
+**重点部分：结合“公告”与“行情”推演情绪**
+1) **舆情与事件梳理**：概括近期公告要点（如有），或指出“今日无重大公告，行情主要受市场情绪/板块轮动主导”。
+2) **财务影响推演**：定性分析事件对公司【营收/利润/成本】的潜在影响（如无事件，则分析宏观/行业因素）。
+3) **盈利预期修正**：判断当前市场对公司未来的盈利预期是否发生变化。
 
 五、<h3>后续观察要点与策略思路</h3>
 1) 给出 2~3 个需要重点观察的价格或技术信号（如“若有效跌破 MA20...”）；
@@ -238,7 +326,7 @@ def generate_single_stock_report(info):
 
 【格式要求】
 1) 仅输出 HTML 代码片段。
-2) 风格参考专业券商研报，理性、克制。
+2) 风格参考专业券商研报，理性、克制、逻辑严密。
 """
     if PROVIDER == "gemini":
         return call_gemini_http(prompt)
