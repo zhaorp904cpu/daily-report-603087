@@ -2,13 +2,13 @@ name: Daily Stock Report
 
 on:
   schedule:
+    # 北京时间 16:00 = UTC 08:00
     - cron: "0 8 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
   run-report:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install requests
+          pip install -r requirements.txt
 
       - name: Run daily report
         env:
@@ -29,8 +29,7 @@ jobs:
           REPORT_MAIL: ${{ secrets.REPORT_MAIL }}
           REPORT_MAIL_PASS: ${{ secrets.REPORT_MAIL_PASS }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          REPORT_STOCK_CODE: ${{ vars.REPORT_STOCK_CODE }}
-          REPORT_STOCK_NAME: ${{ vars.REPORT_STOCK_NAME }}
-          REPORT_COMPANY_PROFILE: ${{ vars.REPORT_COMPANY_PROFILE }}
+          # 格式：代码:名称,代码:名称
+          REPORT_STOCKS: ${{ vars.REPORT_STOCKS || '603087:甘李药业,300750:宁德时代' }}
         run: |
           python ganli_report.py
