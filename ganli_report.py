@@ -7,11 +7,12 @@ import ssl
 import requests
 import json
 import urllib.parse
+import re
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+
+def log_to_file(msg):
+    print(msg)
+
 
 # --- 配置部分 ---
 PROVIDER = os.environ.get("REPORT_PROVIDER", "deepseek")
@@ -31,8 +32,8 @@ MODEL_CONFIG = {
     },
     "deepseek": {
         "api_key": os.environ.get("DEEPSEEK_API_KEY", "sk-d32f992aa8e749599bfe4079f2ac7a25"),
-        "base_url":  "https://api.deepseek.com/chat/completions",
-        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
+        "base_url": "https://api.deepseek.com/chat/completions",
+        "model": "deepseek-reasoner"
     },
     "grok": {
         "api_key": os.environ.get("GROK_API_KEY", "YOUR_GROK_API_KEY"),
@@ -65,9 +66,6 @@ def gen_eastmoney_secid(code: str) -> str:
 
 
 def get_market_data(stock_code, stock_name):
-    """
-    获取指定股票的行情数据
-    """
     print(f"📡 [{stock_name}] 正在抓取行情...")
     secid = gen_eastmoney_secid(stock_code)
     url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -81,13 +79,18 @@ def get_market_data(stock_code, stock_name):
         "end": "20500101",
         "lmt": "60",
     }
-    try:
-        r = requests.get(url, params=params, timeout=10)
-    except Exception as e:
-        raise RuntimeError(f"[{stock_name}] 行情接口连接失败: {e}")
-    
-    if r.status_code != 200:
-        raise RuntimeError(f"[{stock_name}] 东方财富接口请求失败: {r.status_code}")
+    last_exc = None
+    for i in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=20)
+            if r.status_code == 200:
+                break
+            last_exc = RuntimeError(f"HTTP {r.status_code}")
+        except Exception as e:
+            last_exc = e
+        time.sleep(1.5)
+    else:
+        raise RuntimeError(f"[{stock_name}] 行情接口连接失败: {last_exc}")
     
     data = r.json()
     if "data" not in data or not data["data"] or "klines" not in data["data"]:
@@ -160,7 +163,7 @@ def call_openai_compatible_api(prompt: str) -> str:
         ],
         "temperature": 0.7
     }
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    resp = requests.post(url, headers=headers, json=payload, timeout=300)
     if resp.status_code != 200:
         raise RuntimeError(f"API 报错 ({resp.status_code}): {resp.text}")
     data = resp.json()
@@ -171,10 +174,7 @@ def call_openai_compatible_api(prompt: str) -> str:
 
 
 def get_stock_news(stock_code, stock_name):
-    """
-    抓取东方财富的新闻资讯和研报摘要
-    """
-    print(f"📰 [{stock_name}] 正在抓取新闻资讯...")
+    log_to_file(f"📰 [{stock_name}] 正在抓取新闻资讯...")
     news_content = ""
     
     # 1. 抓取公告 (EastMoney)
@@ -201,6 +201,21 @@ def get_stock_news(stock_code, stock_name):
                     news_content += f"- {date}: {title}\n"
     except Exception as e:
         print(f"⚠️ 公告抓取失败: {e}")
+
+    # 2. 尝试抓取新浪财经个股资讯 (Sina Finance)
+    # 既然直接抓取微博困难，我们抓取新浪财经的个股新闻列表，通常包含媒体报道
+    try:
+        if stock_code.startswith("6"):
+            sina_symbol = f"sh{stock_code}"
+        else:
+            sina_symbol = f"sz{stock_code}"
+            
+        # 使用新浪财经的新闻接口 (JSONP or HTML)
+        # 这里尝试抓取 HTML 页面的一小部分，或者直接跳过，因为之前的测试不太稳定。
+        # 我们改用构造“微博搜索链接”提供给 AI 参考（虽然 AI 无法上网，但我们可以告诉用户去点）
+        pass
+    except Exception:
+        pass
     
     return news_content
 
@@ -208,6 +223,50 @@ def get_stock_news(stock_code, stock_name):
 def get_weibo_search_url(stock_name):
     encoded = urllib.parse.quote(stock_name)
     return f"https://s.weibo.com/weibo?q={encoded}"
+
+
+def get_weibo_posts(stock_name):
+    cookie = os.environ.get("WEIBO_COOKIE")
+    if not cookie:
+        return ""
+    print(f"💬 [{stock_name}] 正在抓取微博舆情...")
+    encoded = urllib.parse.quote(stock_name)
+    url = f"https://s.weibo.com/weibo?q={encoded}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://s.weibo.com/",
+        "Cookie": cookie,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"⚠️ 微博搜索返回状态码: {resp.status_code}")
+            return ""
+        text = resp.text
+        if "passport.weibo.com" in resp.url or "安全验证" in text[:1000]:
+            print("⚠️ 微博需要重新登录或验证，无法获取舆情")
+            return ""
+        matches = re.findall(r'<p class="txt"[^>]*>(.*?)</p>', text, flags=re.S)
+        posts = []
+        for raw in matches:
+            cleaned = re.sub(r"<.*?>", "", raw)
+            cleaned = cleaned.replace("\n", " ").replace("\r", " ").strip()
+            if len(cleaned) >= 8 and "微博 weibo.com" not in cleaned:
+                posts.append(cleaned)
+        unique = []
+        for p in posts:
+            if p not in unique:
+                unique.append(p)
+        if not unique:
+            return ""
+        summary = "【微博近期讨论摘要】\n"
+        for p in unique[:8]:
+            summary += f"- {p}\n"
+        return summary
+    except Exception as e:
+        print(f"⚠️ 抓取微博舆情失败: {e}")
+        return ""
 
 
 def get_x_tweets(stock_code, stock_name):
@@ -246,18 +305,15 @@ def get_x_tweets(stock_code, stock_name):
 
 
 def generate_single_stock_report(info):
-    """
-    生成单只股票的 HTML 报告片段（详细专业版）
-    """
     stock_name = info["名称"]
     stock_code = info["代码"]
     
-    # 获取新闻资讯
     news_data = get_stock_news(stock_code, stock_name)
+    weibo_data = get_weibo_posts(stock_name)
     x_data = get_x_tweets(stock_code, stock_name)
     weibo_url = get_weibo_search_url(stock_name)
     
-    print(f"🧠 [{stock_name}] 正在调用模型: {PROVIDER}...")
+    log_to_file(f"🧠 [{stock_name}] 正在调用模型: {PROVIDER}...")
     
     prompt = f"""
 你是一名长期跟踪{stock_name}({stock_code})的专业卖方分析师，负责撰写“单票监控日报”。
@@ -274,6 +330,7 @@ def generate_single_stock_report(info):
 
 【近期资讯与舆情输入】
 {news_data}
+{weibo_data}
 {x_data}
 (注：微博和 X(Twitter) 均受反爬与权限限制，文本可能不完整。请结合“股价波动幅度”和“成交量”综合推断市场情绪，例如：无利好大涨意味着情绪亢奋/游资炒作；缩量阴跌意味着人气涣散。)
 
@@ -288,8 +345,15 @@ def generate_single_stock_report(info):
 <div style="border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 20px;">
     <h2 style="margin: 0; color: #2c3e50;">{stock_name} ({stock_code}) - 每日深度追踪</h2>
     <div style="font-size: 12px; margin-top: 5px; color: #666;">
-        <a href="{weibo_url}" target="_blank" style="color: #e74c3c; text-decoration: none; font-weight: bold;">🔍 点击查看微博实时舆情</a>
+        <a href="{weibo_url}" target="_blank" style="color: #e74c3c; text-decoration: none;">🔍 点击查看微博实时舆情</a>
     </div>
+</div>
+
+<!-- 重点事件高亮区域 -->
+<div style="margin-bottom: 20px; padding: 15px; background-color: #fff3f3; border-left: 5px solid #e74c3c;">
+    <h2 style="margin: 0; color: #e74c3c; font-size: 20px; font-weight: bold;">
+        🔥 今日最关键事件：[请在此处总结当日发生的最重要的一件事，如无重大事件则写“今日无重大消息，情绪主导”]
+    </h2>
 </div>
 
 一、<h3>当日核心结论</h3>
@@ -312,30 +376,39 @@ def generate_single_stock_report(info):
 3) 行业政策或宏观环境对该公司的潜在影响；
 4) 当前估值水平的定性判断（偏低、合理、偏高）。
 
-四、<h3>事件与风险跟踪（深度舆情分析）</h3>
-**重点部分：结合“公告”与“行情”推演情绪**
-1) **舆情与事件梳理**：概括近期公告要点（如有），或指出“今日无重大公告，行情主要受市场情绪/板块轮动主导”。
+    四、<h3>事件与风险跟踪（深度舆情分析）</h3>
+    **重点部分：结合“公告”与“行情”推演情绪**
+    1) **舆情与事件梳理**：概括近期公告要点（如有），或指出“今日无重大公告，行情主要受市场情绪/板块轮动主导”。对你在本段引用的**每一条重要公告或具体事件**，务必在描述中明确标注【公告/事件日期】，例如“2026-01-15 公司发布……公告”。若引用微博或 Twitter(X) 等社交媒体中的具体观点或信息，请在句中或句后标注【发帖日期】，例如“（微博 2026-01-15）”、“（X 2026-01-15）”。
 2) **财务影响推演**：定性分析事件对公司【营收/利润/成本】的潜在影响（如无事件，则分析宏观/行业因素）。
 3) **盈利预期修正**：判断当前市场对公司未来的盈利预期是否发生变化。
 
-五、<h3>后续观察要点与策略思路</h3>
-1) 给出 2~3 个需要重点观察的价格或技术信号（如“若有效跌破 MA20...”）；
-2) 针对不同类型投资者（稳健型/激进型）给出简要策略建议。
+    五、<h3>后续观察要点与策略思路</h3>
+    1) 给出 2~3 个需要重点观察的价格或技术信号（如“若有效跌破 MA20...”）；
+    2) 针对不同类型投资者（稳健型/激进型）给出简要策略建议。
+
+    六、<h3>数据与信息来源及时间说明</h3>
+    请在报告结尾补充一个简短的小节，列表形式列出本报告使用的主要数据与信息来源，并注明时间范围，例如：
+    - 行情与成交数据：来自东方财富 K 线接口，数据截至 {info["日期"]} 收盘；
+    - 公告与公司新闻：来自东方财富公告接口，主要引用近几日公告（以各公告原文日期为准）；
+    - 社交媒体舆情：来自微博检索链接和 Twitter(X) API，内容为报告生成当日附近检索到的公开信息，引用具体观点时在文中已标注发帖日期。
 
 </div>
 
 【格式要求】
 1) 仅输出 HTML 代码片段。
-2) 风格参考专业券商研报，理性、克制、逻辑严密。
+    2) 风格参考专业券商研报，理性、克制、逻辑严密。
 """
     if PROVIDER == "gemini":
-        return call_gemini_http(prompt)
+        result = call_gemini_http(prompt)
     else:
-        return call_openai_compatible_api(prompt)
+        result = call_openai_compatible_api(prompt)
+    
+    log_to_file(f"✅ [{stock_name}] 模型生成完成")
+    return result
 
 
 def send_mail(html_content):
-    from email.mime.text import MIMEText
+    from email.mime_text import MIMEText
     from email.header import Header
     from email.utils import formataddr
 
@@ -399,7 +472,7 @@ def main():
         </style>
     </head>
     <body>
-        <h1>📈 AI 每日投研简报 ({datetime.date.today()})</h1>
+        <h1>📈 自选品种追踪日报 ({datetime.date.today()})</h1>
         <p style="text-align: center;">模型: {PROVIDER} | 标的数量: {len(stock_list)}</p>
         <hr>
     """
@@ -434,6 +507,8 @@ def main():
         send_mail(full_report_html)
     else:
         print("❌ 没有成功生成任何股票的报告，跳过发送邮件")
+    
+    print("🏁 程序执行结束")
 
 
 if __name__ == "__main__":
