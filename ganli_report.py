@@ -32,7 +32,7 @@ MODEL_CONFIG = {
     "deepseek": {
         "api_key": os.environ.get("DEEPSEEK_API_KEY", "sk-d32f992aa8e749599bfe4079f2ac7a25"),
         "base_url":  "https://api.deepseek.com/chat/completions",
-        "model":"deepseek-reasoner"
+        "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
     },
     "grok": {
         "api_key": os.environ.get("GROK_API_KEY", "YOUR_GROK_API_KEY"),
