@@ -2,6 +2,8 @@ name: Daily Stock Report
 
 on:
   schedule:
+    # 北京时间 09:00 = UTC 01:00
+    - cron: "0 1 * * 1-5"
     # 北京时间 16:00 = UTC 08:00
     - cron: "0 8 * * 1-5"
   workflow_dispatch: {}
