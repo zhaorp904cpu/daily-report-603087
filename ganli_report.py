@@ -17,8 +17,8 @@ def log_to_file(msg):
 # --- 配置部分 ---
 PROVIDER = os.environ.get("REPORT_PROVIDER", "deepseek")
 
-MY_MAIL = os.environ.get("REPORT_MAIL", "121438169@qq.com")
-MY_PASS = os.environ.get("REPORT_MAIL_PASS", "uimpjxbvhgmlbide")
+MY_MAIL = os.environ.get("REPORT_MAIL", "你的QQ邮箱")
+MY_PASS = os.environ.get("REPORT_MAIL_PASS", "SMTP授权码")
 
 # 支持多标的配置，格式：代码:名称,代码:名称
 # 默认值：603087:甘李药业
@@ -31,7 +31,7 @@ MODEL_CONFIG = {
         "model": "gemini-1.5-flash"
     },
     "deepseek": {
-        "api_key": os.environ.get("DEEPSEEK_API_KEY", "sk-d32f992aa8e749599bfe4079f2ac7a25"),
+        "api_key": os.environ.get("DEEPSEEK_API_KEY", "YOUR_DEEPSEEK_API_KEY"),
         "base_url": "https://api.deepseek.com/chat/completions",
         "model": "deepseek-reasoner"
     },
@@ -416,7 +416,7 @@ def send_mail(html_content):
     msg["From"] = formataddr((str(Header("AI 投研助手", "utf-8")), MY_MAIL))
     msg["To"] = formataddr((str(Header("投资者", "utf-8")), MY_MAIL))
     msg["Subject"] = Header(
-        f"【{PROVIDER.upper()} 研报】多股监控日报 - {datetime.date.today()}",
+        f"自选品种追踪日报 ({datetime.date.today()})",
         "utf-8",
     )
 
