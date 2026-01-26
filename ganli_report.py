@@ -9,6 +9,9 @@ import json
 import urllib.parse
 import re
 
+# Set stdout to utf-8 for Windows console support
+sys.stdout.reconfigure(encoding='utf-8')
+
 
 def log_to_file(msg):
     print(msg)
@@ -17,12 +20,12 @@ def log_to_file(msg):
 # --- 配置部分 ---
 PROVIDER = os.environ.get("REPORT_PROVIDER", "deepseek")
 
-MY_MAIL = os.environ.get("REPORT_MAIL", "你的QQ邮箱")
-MY_PASS = os.environ.get("REPORT_MAIL_PASS", "SMTP授权码")
+MY_MAIL = os.environ.get("REPORT_MAIL", "121438169@qq.com")
+MY_PASS = os.environ.get("REPORT_MAIL_PASS", "uimpjxbvhgmlbide")
 
 # 支持多标的配置，格式：代码:名称,代码:名称
-# 默认值：603087:甘李药业
-REPORT_STOCKS_STR = os.environ.get("REPORT_STOCKS", "603087:甘李药业")
+# 默认值：603087:甘李药业,000893:亚钾国际
+REPORT_STOCKS_STR = os.environ.get("REPORT_STOCKS", "603087:甘李药业,000893:亚钾国际")
 
 MODEL_CONFIG = {
     "gemini": {
@@ -31,7 +34,7 @@ MODEL_CONFIG = {
         "model": "gemini-1.5-flash"
     },
     "deepseek": {
-        "api_key": os.environ.get("DEEPSEEK_API_KEY", "YOUR_DEEPSEEK_API_KEY"),
+        "api_key": os.environ.get("DEEPSEEK_API_KEY", "sk-d32f992aa8e749599bfe4079f2ac7a25"),
         "base_url": "https://api.deepseek.com/chat/completions",
         "model": "deepseek-reasoner"
     },
@@ -79,10 +82,13 @@ def get_market_data(stock_code, stock_name):
         "end": "20500101",
         "lmt": "60",
     }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     last_exc = None
     for i in range(3):
         try:
-            r = requests.get(url, params=params, timeout=20)
+            r = requests.get(url, params=params, headers=headers, timeout=20)
             if r.status_code == 200:
                 break
             last_exc = RuntimeError(f"HTTP {r.status_code}")
@@ -219,7 +225,6 @@ def get_stock_news(stock_code, stock_name):
     
     return news_content
 
-
 def get_weibo_search_url(stock_name):
     encoded = urllib.parse.quote(stock_name)
     return f"https://s.weibo.com/weibo?q={encoded}"
@@ -303,78 +308,284 @@ def get_x_tweets(stock_code, stock_name):
         print(f"⚠️ 抓取 X 推文失败: {e}")
         return ""
 
+def get_stock_base_info(stock_code):
+    # Fetch basic info like Total Shares
+    secid = gen_eastmoney_secid(stock_code)
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+    params = {
+        "secid": secid,
+        "fields": "f57,f84,f85,f116,f117",  # f84: Total Shares, f116: Total Market Cap
+        "invt": "2",
+        "fltt": "2",
+        "pos": "-1",
+        "secid2": secid
+    }
+    try:
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if "data" in data and data["data"]:
+                return {
+                    "total_shares": data["data"]["f84"], # 股本(股)
+                    "market_cap": data["data"]["f116"]   # 总市值(元)
+                }
+    except Exception as e:
+        print(f"⚠️ 基础信息抓取失败: {e}")
+    return None
+
+def calculate_dcf(fcf, total_shares, growth_rate=0.10, wacc=0.08, terminal_growth=0.02, years=10):
+    """
+    Simple 2-stage DCF Model
+    """
+    if fcf <= 0 or total_shares <= 0:
+        return None
+    
+    future_value_sum = 0
+    # Stage 1: Growth
+    for i in range(1, years + 1):
+        projected_fcf = fcf * ((1 + growth_rate) ** i)
+        discounted_val = projected_fcf / ((1 + wacc) ** i)
+        future_value_sum += discounted_val
+        
+    # Stage 2: Terminal Value
+    terminal_fcf = fcf * ((1 + growth_rate) ** years) * (1 + terminal_growth)
+    if wacc <= terminal_growth:
+        terminal_value = 0 # Safety check
+    else:
+        terminal_value = terminal_fcf / (wacc - terminal_growth)
+    
+    discounted_tv = terminal_value / ((1 + wacc) ** years)
+    
+    total_value = future_value_sum + discounted_tv
+    return total_value / total_shares
+
+def get_financial_data(stock_code):
+    print(f"💰 [{stock_code}] 正在抓取财务数据(FCF)...")
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params = {
+        "reportName": "RPT_DMSK_FN_CASHFLOW",
+        "columns": "ALL",
+        "filter": f'(SECURITY_CODE="{stock_code}")',
+        "pageNumber": "1",
+        "pageSize": "1",
+        "sortTypes": "-1",
+        "sortColumns": "REPORT_DATE",
+        "source": "WEB",
+        "client": "WEB",
+        "_": str(int(time.time() * 1000))
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://data.eastmoney.com/"
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if "result" in data and data["result"] and "data" in data["result"]:
+                item = data["result"]["data"][0]
+                date = item.get("REPORT_DATE")
+                ocf = item.get("NETCASH_OPERATE")
+                capex = item.get("CONSTRUCT_LONG_ASSET") # This is cash OUTFLOW, usually positive number in DB but represents negative cash
+                # In EastMoney data, PAY_FIXED_ASSETS or CONSTRUCT_LONG_ASSET is usually a positive number representing the amount paid.
+                # So FCF = OCF - CapEx
+                
+                if ocf is not None and capex is not None:
+                    fcf = ocf - capex
+                    return {
+                        "report_date": date,
+                        "ocf": ocf,
+                        "capex": capex,
+                        "fcf": fcf
+                    }
+    except Exception as e:
+        print(f"⚠️ 财务数据抓取失败: {e}")
+    return None
+
+def get_research_report_summary(stock_code):
+    print(f"📑 [{stock_code}] 正在抓取研报数据...")
+    url = "https://reportapi.eastmoney.com/report/list"
+    params = {
+        "industryCode": "*",
+        "pageSize": "5",
+        "pageNo": "1",
+        "fields": "",
+        "qType": "0",
+        "orgCode": "",
+        "code": stock_code,
+        "rcode": "",
+        "p": "1",
+        "pageNum": "1",
+        "pageNumber": "1",
+        "sort": "date",
+        "sortOrder": "desc",
+        "reportType": "1",
+        "_": str(int(time.time() * 1000))
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "data" in data and data["data"]:
+                summary = "【最新研报观点与盈利预测】\n"
+                for item in data["data"]:
+                    title = item.get("title", "")
+                    org = item.get("orgSName", "")
+                    date = item.get("publishDate", "")[:10]
+                    # Forecasts
+                    eps_0 = item.get("predictThisYearEps", "")
+                    pe_0 = item.get("predictThisYearPe", "")
+                    eps_1 = item.get("predictNextYearEps", "")
+                    pe_1 = item.get("predictNextYearPe", "")
+                    eps_2 = item.get("predictNextTwoYearEps", "")
+                    
+                    summary += f"- [{date}] {org}: {title}\n"
+                    if eps_0:
+                        summary += f"  (当年预测EPS: {eps_0}, PE: {pe_0})\n"
+                    if eps_1:
+                        summary += f"  (次年预测EPS: {eps_1}, PE: {pe_1})\n"
+                    if eps_2:
+                        summary += f"  (后年预测EPS: {eps_2})\n"
+                return summary
+    except Exception as e:
+        print(f"⚠️ 研报抓取失败: {e}")
+    return "（暂无最新研报数据）"
+
 
 def generate_single_stock_report(info):
     stock_name = info["名称"]
     stock_code = info["代码"]
     
     news_data = get_stock_news(stock_code, stock_name)
+    report_data = get_research_report_summary(stock_code)
     weibo_data = get_weibo_posts(stock_name)
     x_data = get_x_tweets(stock_code, stock_name)
     weibo_url = get_weibo_search_url(stock_name)
     
+    financial_data = get_financial_data(stock_code)
+    base_info = get_stock_base_info(stock_code)
+    
+    fcf_text = ""
+    dcf_val = None
+    if financial_data:
+        ocf_亿 = financial_data["ocf"] / 100000000
+        capex_亿 = financial_data["capex"] / 100000000
+        fcf_亿 = financial_data["fcf"] / 100000000
+        date_str = financial_data["report_date"][:10]
+        
+        dcf_text_part = "无法计算 (FCF为负或缺失股本数据)"
+        if financial_data["fcf"] > 0 and base_info and base_info["total_shares"]:
+             # Assumptions: 10% growth for 10 years, 8% WACC, 2% Terminal
+             dcf_val = calculate_dcf(financial_data["fcf"], base_info["total_shares"])
+             if dcf_val:
+                 dcf_text_part = f"{dcf_val:.2f} 元/股 (基于FCF模型: 10年增长10%, WACC 8%)"
+
+        fcf_text = f"""
+    【最新财务数据 ({date_str})】
+    - 经营活动现金流净额(OCF): {ocf_亿:.2f} 亿元
+    - 资本开支(CapEx): {capex_亿:.2f} 亿元 (购建固定资产等支付的现金)
+    - 自由现金流(FCF): {fcf_亿:.2f} 亿元 (OCF - CapEx)
+    - DCF模型估值参考: {dcf_text_part}
+    """
+
     log_to_file(f"🧠 [{stock_name}] 正在调用模型: {PROVIDER}...")
     
+    extra_instructions = ""
+    if "亚钾国际" in stock_name or "000893" in stock_code:
+        # 尝试读取本地研报总结
+        local_summary = ""
+        summary_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports_summary.md")
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    local_summary = f.read()
+            except Exception:
+                pass
+
+        extra_instructions = f"""
+    【特别指令】
+    针对“亚钾国际”，请在“基本面与估值跟踪”部分特别增加“国际钾肥价格趋势”的分析。
+    并且，请尝试生成一个 QuickChart.io 的图表链接，展示过去3年的国际钾肥价格走势（可基于你掌握的历史数据估算趋势），以 <img src="..." width="100%"> 的形式嵌入。
+    如果无法生成图表，请务必用 HTML 表格展示过去3年的关键价格节点（如每年年初/年中的价格）。
+
+    【本地研报深度总结（重要参考）】
+    请重点参考以下最近抓取的研报详细摘要，将其中的关键观点、盈利预测（营收/净利/EPS）和风险提示整合进报告中：
+    {local_summary}
+    """
+
     prompt = f"""
-你是一名长期跟踪{stock_name}({stock_code})的专业卖方分析师，负责撰写“单票监控日报”。
+    {extra_instructions}
+    你是一名长期跟踪{stock_name}({stock_code})的专业卖方分析师，负责撰写“单票监控日报”。
 
-请根据下述“当日行情与技术数据”以及“近期资讯与舆情”，输出一份结构化的 HTML 日报片段。
-要求：内容专业、简洁、有观点，避免空泛套话。
+    请根据下述“当日行情与技术数据”以及“近期资讯与舆情”，输出一份结构化的 HTML 日报片段。
+    要求：内容专业、简洁、有观点，避免空泛套话。
 
-【当日行情与技术数据】
-- 日期：{info["日期"]}
-- 收盘价：{info["收盘"]:.2f} 元，涨跌幅：{info["涨跌幅"]:.2f}% ，涨跌额：{info["涨跌额"]:.2f} 元
-- 今开价：{info["今开"]:.2f} 元，最高价：{info["最高"]:.2f} 元，最低价：{info["最低"]:.2f} 元
-- 成交额：{info["成交额"]/100000000:.2f} 亿元，成交量：{info["成交量"]:.0f} 手，换手率：{info["换手率"]:.2f}%
-- 均线：MA5={info["MA5"]:.2f}，MA10={info["MA10"]:.2f}，MA20={info["MA20"]:.2f}
+    【当日行情与技术数据】
+    - 日期：{info["日期"]}
+    - 收盘价：{info["收盘"]:.2f} 元，涨跌幅：{info["涨跌幅"]:.2f}% ，涨跌额：{info["涨跌额"]:.2f} 元
+    - 今开价：{info["今开"]:.2f} 元，最高价：{info["最高"]:.2f} 元，最低价：{info["最低"]:.2f} 元
+    - 成交额：{info["成交额"]/100000000:.2f} 亿元，成交量：{info["成交量"]:.0f} 手，换手率：{info["换手率"]:.2f}%
+    - 均线：MA5={info["MA5"]:.2f}，MA10={info["MA10"]:.2f}，MA20={info["MA20"]:.2f}
 
-【近期资讯与舆情输入】
-{news_data}
-{weibo_data}
-{x_data}
-(注：微博和 X(Twitter) 均受反爬与权限限制，文本可能不完整。请结合“股价波动幅度”和“成交量”综合推断市场情绪，例如：无利好大涨意味着情绪亢奋/游资炒作；缩量阴跌意味着人气涣散。)
+    【近期资讯与舆情输入】
+    {news_data}
+    {report_data}
+    {weibo_data}
+    {x_data}
+    {fcf_text}
+    (注：微博和 X(Twitter) 均受反爬与权限限制，文本可能不完整。请结合“股价波动幅度”和“成交量”综合推断市场情绪，例如：无利好大涨意味着情绪亢奋/游资炒作；缩量阴跌意味着人气涣散。)
 
 【写作任务】
-请严格按照以下模块输出，并使用 HTML 标签（如 h2, h3, p, ul, li, table 等）组织内容。
-**注意：不要包含 <html>, <head>, <body> 标签，仅输出 div 片段。**
+    请严格按照以下模块输出，并使用 HTML 标签（如 h2, h3, p, ul, li, table 等）组织内容。
+    **注意：不要包含 <html>, <head>, <body> 标签，仅输出 div 片段。**
 
-请将整个报告包裹在一个 <div style="border: 1px solid #ddd; padding: 20px; margin-bottom: 30px; border-radius: 8px; background-color: #fff;"> 容器中。
+    请将整个报告包裹在一个 <div style="border: 1px solid #ddd; padding: 20px; margin-bottom: 30px; border-radius: 8px; background-color: #fff;"> 容器中。
 
-结构如下：
+    结构如下：
 
-<div style="border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 20px;">
-    <h2 style="margin: 0; color: #2c3e50;">{stock_name} ({stock_code}) - 每日深度追踪</h2>
-    <div style="font-size: 12px; margin-top: 5px; color: #666;">
-        <a href="{weibo_url}" target="_blank" style="color: #e74c3c; text-decoration: none;">🔍 点击查看微博实时舆情</a>
+    <div style="border-bottom: 2px solid #3498db; padding-bottom: 10px; margin-bottom: 20px;">
+        <h2 style="margin: 0; color: #2c3e50;">{stock_name} ({stock_code}) - 每日深度追踪</h2>
+        <div style="font-size: 12px; margin-top: 5px; color: #666;">
+            <a href="{weibo_url}" target="_blank" style="color: #e74c3c; text-decoration: none;">🔍 点击查看微博实时舆情</a>
+        </div>
     </div>
-</div>
 
-<!-- 重点事件高亮区域 -->
-<div style="margin-bottom: 20px; padding: 15px; background-color: #fff3f3; border-left: 5px solid #e74c3c;">
-    <h2 style="margin: 0; color: #e74c3c; font-size: 20px; font-weight: bold;">
-        🔥 今日最关键事件：[请在此处总结当日发生的最重要的一件事，如无重大事件则写“今日无重大消息，情绪主导”]
-    </h2>
-</div>
+    <!-- 重点事件高亮区域 -->
+    <div style="margin-bottom: 20px; padding: 15px; background-color: #fff3f3; border-left: 5px solid #e74c3c;">
+        <h2 style="margin: 0; color: #e74c3c; font-size: 20px; font-weight: bold;">
+            🔥 今日最关键事件：[请在此处总结当日发生的最重要的一件事，如无重大事件则写“今日无重大消息，情绪主导”]
+        </h2>
+    </div>
 
-一、<h3>当日核心结论</h3>
-用 2~4 句简洁文字，总结：
-1) 今天股价和成交的核心变化是什么；
-2) 该变化更多来自情绪波动，还是基本面或事件驱动；
-3) 对短期(1~2 周)和中期(3~6 个月)的观点是偏多、中性还是偏谨慎。
+    一、<h3>当日核心结论</h3>
+    用 2~4 句简洁文字，总结：
+    1) 今天股价和成交的核心变化是什么；
+    2) 该变化更多来自情绪波动，还是基本面或事件驱动；
+    3) 对短期(1~2 周)和中期(3~6 个月)的观点是偏多、中性还是偏谨慎。
 
-二、<h3>当日交易与技术面</h3>
-1) 生成一张 HTML 表格 (table)，包含列：收盘、涨跌幅、成交额(亿)、换手率。
-   (数值保留两位小数，**注意：表格中不再列出具体均线数值**)
-2) 在表格下用 1~2 句简练文字，仅分析：
-   a) 量价配合是否健康；
-   b) 是否出现关键的突破或反转形态（如吞没、启明星等），不必纠结于具体均线支撑位。
+    二、<h3>当日交易与技术面</h3>
+    1) 生成一张 HTML 表格 (table)，包含列：收盘、涨跌幅、成交额(亿)、换手率。
+       (数值保留两位小数，**注意：表格中不再列出具体均线数值**)
+    2) 在表格下用 1~2 句简练文字，仅分析：
+       a) 量价配合是否健康；
+       b) 是否出现关键的突破或反转形态（如吞没、启明星等），不必纠结于具体均线支撑位。
 
-三、<h3>基本面与估值跟踪</h3>
-在不编造具体财务数字的前提下，从以下角度定性评估：
-1) **{stock_name}** 在其所属行业（如医药、新能源等）的定位、核心产品和当前成长逻辑；
-2) 市场对其收入增速和盈利能力的预期变化；
-3) 行业政策或宏观环境对该公司的潜在影响；
-4) 当前估值水平的定性判断（偏低、合理、偏高）。
+    三、<h3>基本面与估值跟踪</h3>
+    在不编造具体财务数字的前提下，从以下角度定性评估：
+    1) **{stock_name}** 在其所属行业（如医药、新能源等）的定位、核心产品和当前成长逻辑；
+    2) 市场对其收入增速和盈利能力的预期变化；
+    3) 行业政策或宏观环境对该公司的潜在影响；
+    4) 当前估值水平的定性判断（偏低、合理、偏高）。
+
+    **特别要求：**
+    1. 请基于【最新研报观点与盈利预测】中的数据，在基本面分析中增加“盈利预测”小节。
+       - 展示分析师对当年及次年的盈利（EPS/营收）预测数据。
+       - 如果研报摘要中包含具体的“营收/净利润同比增速”预测，请重点列出（季度或年度）。
+       - 若无具体的季度预测数据，请根据近期财报（公告）分析季度增长趋势。
+    2. 请基于【最新财务数据】（如有），在基本面分析中增加“现金流与估值分析”小节。
+       - 列出经营活动现金流净额(OCF)和资本开支(CapEx)数据。
+       - 分析自由现金流(FCF)的状态（正/负）。
+       - 结合DCF模型计算出的每股价值（如有），对比当前股价进行点评（例如：若DCF值远高于股价，可能低估；反之需结合高增长预期讨论）。DCF模型仅供参考，需提示其对增长率假设敏感。
 
     四、<h3>事件与风险跟踪（深度舆情分析）</h3>
     **重点部分：结合“公告”与“行情”推演情绪**
